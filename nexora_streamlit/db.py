@@ -1,4 +1,3 @@
-
 import sqlite3
 import hashlib
 import os
@@ -69,10 +68,22 @@ def init_db():
             CREATE TABLE IF NOT EXISTS books (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
-                filename TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chapters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                order_index INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 uploaded_by TEXT,
-                uploaded_at TEXT NOT NULL
+                uploaded_at TEXT NOT NULL,
+                FOREIGN KEY (book_id) REFERENCES books(id)
             )
             """
         )
@@ -195,12 +206,11 @@ def set_setting(key: str, value: str):
         )
  
  
-def add_book(title: str, filename: str, content: str, uploaded_by: str) -> int:
+def create_book(title: str, created_by: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO books (title, filename, content, uploaded_by, uploaded_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (title, filename, content, uploaded_by, datetime.utcnow().isoformat()),
+            "INSERT INTO books (title, created_by, created_at) VALUES (?, ?, ?)",
+            (title, created_by, datetime.utcnow().isoformat()),
         )
         return cur.lastrowid
  
@@ -208,8 +218,14 @@ def add_book(title: str, filename: str, content: str, uploaded_by: str) -> int:
 def get_all_books():
     with get_conn() as conn:
         return conn.execute(
-            "SELECT id, title, filename, uploaded_by, uploaded_at, LENGTH(content) as content_len "
-            "FROM books ORDER BY uploaded_at DESC"
+            """
+            SELECT b.id, b.title, b.created_by, b.created_at,
+                   COUNT(c.id) as chapter_count
+            FROM books b
+            LEFT JOIN chapters c ON c.book_id = b.id
+            GROUP BY b.id
+            ORDER BY b.created_at DESC
+            """
         ).fetchall()
  
  
@@ -220,7 +236,51 @@ def get_book(book_id: int):
  
 def delete_book(book_id: int):
     with get_conn() as conn:
+        conn.execute("DELETE FROM chapters WHERE book_id = ?", (book_id,))
         conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
+ 
+ 
+def add_chapter(book_id: int, title: str, content: str, uploaded_by: str) -> int:
+    with get_conn() as conn:
+        next_order = conn.execute(
+            "SELECT COALESCE(MAX(order_index), 0) + 1 FROM chapters WHERE book_id = ?", (book_id,)
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO chapters (book_id, title, order_index, content, uploaded_by, uploaded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (book_id, title, next_order, content, uploaded_by, datetime.utcnow().isoformat()),
+        )
+        return cur.lastrowid
+ 
+ 
+def get_chapters(book_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, book_id, title, order_index, uploaded_at, LENGTH(content) as content_len "
+            "FROM chapters WHERE book_id = ? ORDER BY order_index",
+            (book_id,),
+        ).fetchall()
+ 
+ 
+def get_chapter(chapter_id: int):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+ 
+ 
+def delete_chapter(chapter_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM chapters WHERE id = ?", (chapter_id,))
+ 
+ 
+def get_book_full_text(book_id: int) -> str:
+    """Concatenate every chapter's content, in order, for whole-book context."""
+    chapters = get_chapters(book_id)
+    with get_conn() as conn:
+        parts = []
+        for ch in chapters:
+            row = conn.execute("SELECT title, content FROM chapters WHERE id = ?", (ch["id"],)).fetchone()
+            parts.append(f"## {row['title']}\n\n{row['content']}")
+        return "\n\n".join(parts)
  
  
 def get_enrollments(username: str):
