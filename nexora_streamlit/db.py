@@ -1,9 +1,3 @@
-"""
-db.py — SQLite persistence layer for Nexora.
-
-Handles user accounts. Passwords are stored as PBKDF2-HMAC-SHA256 hashes
-with a per-user random salt (never store plaintext passwords).
-"""
 
 import sqlite3
 import hashlib
@@ -11,14 +5,14 @@ import os
 import secrets
 from datetime import datetime
 from contextlib import contextmanager
-
+ 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "nexora.db")
-
-
+ 
+ 
 def _hash_password(password: str, salt: bytes) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000).hex()
-
-
+ 
+ 
 @contextmanager
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -29,8 +23,8 @@ def get_conn():
         conn.commit()
     finally:
         conn.close()
-
-
+ 
+ 
 def init_db():
     with get_conn() as conn:
         conn.execute(
@@ -70,25 +64,37 @@ def init_db():
             )
             """
         )
-
-
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content TEXT NOT NULL,
+                uploaded_by TEXT,
+                uploaded_at TEXT NOT NULL
+            )
+            """
+        )
+ 
+ 
 def username_exists(username: str) -> bool:
     with get_conn() as conn:
         row = conn.execute(
             "SELECT 1 FROM users WHERE username = ?", (username,)
         ).fetchone()
         return row is not None
-
-
+ 
+ 
 def create_user(username: str, email: str, password: str, grade: str, is_admin: bool = False) -> tuple[bool, str]:
     if not username or not password:
         return False, "Username and password are required."
     if username_exists(username):
         return False, "That username is already taken."
-
+ 
     salt = secrets.token_bytes(16)
     pwd_hash = _hash_password(password, salt)
-
+ 
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO users (username, email, grade, salt, password_hash, created_at, is_admin) "
@@ -102,8 +108,8 @@ def create_user(username: str, email: str, password: str, grade: str, is_admin: 
                 (username, subject, progress),
             )
     return True, "Account created successfully."
-
-
+ 
+ 
 def verify_user(username: str, password: str) -> tuple[bool, str]:
     with get_conn() as conn:
         row = conn.execute(
@@ -111,59 +117,59 @@ def verify_user(username: str, password: str) -> tuple[bool, str]:
         ).fetchone()
     if row is None:
         return False, "No account found with that username."
-
+ 
     candidate_hash = _hash_password(password, row["salt"])
     if secrets.compare_digest(candidate_hash, row["password_hash"]):
         return True, "Login successful."
     return False, "Incorrect password."
-
-
+ 
+ 
 def get_user(username: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
             "SELECT id, username, email, grade, created_at, is_admin FROM users WHERE username = ?",
             (username,),
         ).fetchone()
-
-
+ 
+ 
 def is_admin_user(username: str) -> bool:
     user = get_user(username)
     return bool(user and user["is_admin"])
-
-
+ 
+ 
 def get_all_users():
     with get_conn() as conn:
         return conn.execute(
             "SELECT id, username, email, grade, created_at, is_admin FROM users ORDER BY created_at DESC"
         ).fetchall()
-
-
+ 
+ 
 def set_admin(username: str, is_admin: bool):
     with get_conn() as conn:
         conn.execute(
             "UPDATE users SET is_admin = ? WHERE username = ?", (int(is_admin), username)
         )
-
-
+ 
+ 
 def delete_user(username: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM users WHERE username = ?", (username,))
         conn.execute("DELETE FROM enrollments WHERE username = ?", (username,))
-
-
+ 
+ 
 def any_admin_exists() -> bool:
     with get_conn() as conn:
         row = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
         return row is not None
-
-
+ 
+ 
 def seed_default_admin(username: str, email: str, password: str, grade: str = "Staff"):
     """Create a first admin account if no admin exists yet. Safe to call on every startup."""
     if any_admin_exists() or username_exists(username):
         return
     create_user(username, email, password, grade, is_admin=True)
-
-
+ 
+ 
 def set_password(username: str, new_password: str):
     salt = secrets.token_bytes(16)
     pwd_hash = _hash_password(new_password, salt)
@@ -172,14 +178,14 @@ def set_password(username: str, new_password: str):
             "UPDATE users SET salt = ?, password_hash = ? WHERE username = ?",
             (salt, pwd_hash, username),
         )
-
-
+ 
+ 
 def get_setting(key: str) -> str | None:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
-
-
+ 
+ 
 def set_setting(key: str, value: str):
     with get_conn() as conn:
         conn.execute(
@@ -187,15 +193,43 @@ def set_setting(key: str, value: str):
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-
-
+ 
+ 
+def add_book(title: str, filename: str, content: str, uploaded_by: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO books (title, filename, content, uploaded_by, uploaded_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (title, filename, content, uploaded_by, datetime.utcnow().isoformat()),
+        )
+        return cur.lastrowid
+ 
+ 
+def get_all_books():
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, title, filename, uploaded_by, uploaded_at, LENGTH(content) as content_len "
+            "FROM books ORDER BY uploaded_at DESC"
+        ).fetchall()
+ 
+ 
+def get_book(book_id: int):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
+ 
+ 
+def delete_book(book_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
+ 
+ 
 def get_enrollments(username: str):
     with get_conn() as conn:
         return conn.execute(
             "SELECT subject, progress FROM enrollments WHERE username = ?", (username,)
         ).fetchall()
-
-
+ 
+ 
 def update_progress(username: str, subject: str, progress: int):
     with get_conn() as conn:
         conn.execute(
